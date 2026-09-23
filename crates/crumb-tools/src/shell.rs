@@ -97,7 +97,6 @@ fn register_shell_tool_inner(
     )?;
     Ok(())
 }
-
 const UNDO_LEDGER_CAPACITY: usize = 50;
 
 struct ShellTool {
@@ -384,6 +383,55 @@ fn ensure_active(cancellation: &CancellationToken) -> Result<()> {
         bail!("tool call cancelled");
     }
     Ok(())
+}
+
+fn modified_since(workspace: &Path, since: std::time::SystemTime) -> Result<Vec<PathBuf>> {
+    let since = since.checked_sub(Duration::from_secs(1)).unwrap_or(since);
+
+    let mut modified = Vec::new();
+    let mut stack = vec![workspace.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        let entries = std::fs::read_dir(&dir)
+            .with_context(|| format!("failed to read directory `{}`", dir.display()))?;
+        for entry in entries {
+            let entry = entry.context("failed to read directory entry")?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("failed to inspect `{}`", path.display()))?;
+
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                if matches!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some(".git") | Some("target") | Some("node_modules")
+                ) {
+                    continue;
+                }
+                stack.push(path);
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+
+            let metadata = entry
+                .metadata()
+                .with_context(|| format!("failed to read metadata for `{}`", path.display()))?;
+            let mtime = metadata.modified().with_context(|| {
+                format!("filesystem lacks mtime support for `{}`", path.display())
+            })?;
+
+            if mtime >= since {
+                modified.push(path);
+            }
+        }
+    }
+
+    Ok(modified)
 }
 
 #[cfg(unix)]
